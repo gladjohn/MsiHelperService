@@ -41,7 +41,14 @@ namespace ConfidentialClientApp
             // Acquire a token for the client
             var authResult = await confidentialClientApp.AcquireTokenForClient(scopes).ExecuteAsync();
 
-            Console.WriteLine($"Token acquired: {authResult.AccessToken}");
+            if (authResult == null || string.IsNullOrEmpty(authResult.AccessToken))
+            {
+                Console.WriteLine("Failed to acquire token.");
+                return;
+            }
+
+            Console.WriteLine($"MSI Helper Service Access Token acquired: {authResult.AccessToken}");
+            Console.WriteLine();
 
             // Call the environment variables API
             var identityInfo = await CallEnvVarApiAsync(authResult.AccessToken).ConfigureAwait(false);
@@ -50,14 +57,22 @@ namespace ConfidentialClientApp
             if (identityInfo != null)
             {
                 var managedIdentityToken = await CallManagedIdentityEndpointAsync(identityInfo, authResult.AccessToken);
-                Console.WriteLine($"Managed Identity Token: {managedIdentityToken}");
+                if (!string.IsNullOrEmpty(managedIdentityToken))
+                {
+                    Console.WriteLine($"Managed Identity Token acquired proxying via MSI Helper Service: {managedIdentityToken}");
+                }
+                else
+                {
+                    Console.WriteLine("Failed to acquire managed identity token.");
+                }
+                Console.WriteLine();
             }
         }
 
         /// <summary>
         /// Retrieves the X509 certificate from the current user's certificate store using the thumbprint.
         /// </summary>
-        private static X509Certificate2 GetCertificateFromStore(string thumbprint)
+        private static X509Certificate2? GetCertificateFromStore(string thumbprint)
         {
             using (var store = new X509Store(StoreLocation.CurrentUser))
             {
@@ -77,7 +92,7 @@ namespace ConfidentialClientApp
         /// <summary>
         /// Calls the environment variables API with the provided token.
         /// </summary>
-        private static async Task<JsonDocument> CallEnvVarApiAsync(string token)
+        private static async Task<JsonDocument?> CallEnvVarApiAsync(string token)
         {
             using (var httpClient = new HttpClient())
             {
@@ -87,11 +102,13 @@ namespace ConfidentialClientApp
                 {
                     var content = await response.Content.ReadAsStringAsync();
                     Console.WriteLine($"API Response: {content}");
+                    Console.WriteLine();
                     return JsonDocument.Parse(content);
                 }
                 else
                 {
                     Console.WriteLine($"API call failed with status code: {response.StatusCode}");
+                    Console.WriteLine();
                     return null;
                 }
             }
@@ -100,12 +117,29 @@ namespace ConfidentialClientApp
         /// <summary>
         /// Calls the managed identity endpoint with the provided identity information and token.
         /// </summary>
-        private static async Task<string> CallManagedIdentityEndpointAsync(JsonDocument identityInfo, string token)
+        private static async Task<string?> CallManagedIdentityEndpointAsync(JsonDocument identityInfo, string token)
         {
             var root = identityInfo.RootElement;
-            string identityHeader = root.GetProperty("IDENTITY_HEADER").GetString();
-            string identityEndpoint = root.GetProperty("IDENTITY_ENDPOINT").GetString();
-            string identityApiVersion = root.GetProperty("IDENTITY_API_VERSION").GetString();
+
+            if (!root.TryGetProperty("IDENTITY_HEADER", out var identityHeaderElement) ||
+                !root.TryGetProperty("IDENTITY_ENDPOINT", out var identityEndpointElement) ||
+                !root.TryGetProperty("IDENTITY_API_VERSION", out var identityApiVersionElement))
+            {
+                Console.WriteLine("One or more required properties are missing from the identity information.");
+                Console.WriteLine();
+                return null;
+            }
+
+            string identityHeader = identityHeaderElement.GetString() ?? string.Empty;
+            string identityEndpoint = identityEndpointElement.GetString() ?? string.Empty;
+            string identityApiVersion = identityApiVersionElement.GetString() ?? string.Empty;
+
+            if (string.IsNullOrEmpty(identityHeader) || string.IsNullOrEmpty(identityEndpoint) || string.IsNullOrEmpty(identityApiVersion))
+            {
+                Console.WriteLine("One or more required properties have null or empty values.");
+                Console.WriteLine();
+                return null;
+            }
 
             // Encode the URL before sending it to the helper service
             string encodedUri = WebUtility.UrlEncode($"{identityEndpoint}?resource={resourceUrl}&api-version={identityApiVersion}".ToLowerInvariant());
@@ -128,6 +162,7 @@ namespace ConfidentialClientApp
                 else
                 {
                     Console.WriteLine($"Managed Identity call failed with status code: {response.StatusCode}");
+                    Console.WriteLine();
                     return null;
                 }
             }
